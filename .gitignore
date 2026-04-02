@@ -207,7 +207,8 @@ marimo/_lsp/
 __marimo__/
 
 
-# instruction and data
+# instruction, quiz, report and data
 instruction.md
 /data/
 quiz.txt
+report.md

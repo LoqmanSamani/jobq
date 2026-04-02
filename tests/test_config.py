@@ -1,25 +1,49 @@
-# ============================================================================
-# test_config.py — Tests for configuration module
-# ============================================================================
-#
-# PURPOSE:
-#   Verify that the configuration system works correctly and produces
-#   valid, consistent settings.
-#
-# TEST CASES:
-#   1. test_default_config_valid
-#      - Instantiate default config → assert all required fields exist
-#      - Assert types are correct (e.g., BATCH_SIZE is int, LR is float)
-#
-#   2. test_config_override
-#      - Override specific fields → verify changes propagate correctly
-#      - Ensure overriding one field doesn't break others
-#
-#   3. test_config_paths_exist
-#      - If DATA_DIR is set, verify the path actually exists on disk
-#
-#   4. test_config_value_ranges
-#      - BATCH_SIZE > 0, LEARNING_RATE > 0, EPOCHS > 0
-#      - TRAIN_SPLIT + VAL_SPLIT + TEST_SPLIT ≈ 1.0
-#      - IMAGE_SIZE elements are positive integers
-# ============================================================================
+"""config tests"""
+
+import os
+import pytest
+from src.config import Config
+
+
+def test_default_config_creates():
+    cfg = Config()
+    assert isinstance(cfg.batch_size, int)
+    assert isinstance(cfg.learning_rate, float)
+    assert isinstance(cfg.image_height, int)
+    assert isinstance(cfg.image_width, int)
+    assert isinstance(cfg.train_ratio, float)
+    assert isinstance(cfg.val_ratio, float)
+    assert isinstance(cfg.test_ratio, float)
+    assert isinstance(cfg.data_dir, str)
+    assert isinstance(cfg.output_dir, str)  
+
+def test_default_paths_filled():
+    """auto-filled of paths from project_dir"""
+    cfg = Config()
+    assert cfg.data_dir != ""
+    assert cfg.output_dir != ""
+    assert cfg.data_dir.endswith("data")
+    assert cfg.output_dir.endswith("outputs")
+
+
+def test_split_ratios_sum_to_one():
+    cfg = Config()
+    total = cfg.train_ratio + cfg.val_ratio + cfg.test_ratio
+    assert abs(total - 1.0) < 1e-6
+
+
+def test_positive_values():
+    cfg = Config()
+    assert cfg.batch_size > 0
+    assert cfg.learning_rate > 0
+    assert cfg.epochs > 0
+    assert cfg.image_height > 0
+    assert cfg.image_width > 0
+    assert cfg.max_objects > 0
+    assert cfg.output_stride > 0
+
+
+def test_override():
+    cfg = Config(batch_size=8, learning_rate=0.001)
+    assert cfg.batch_size == 8
+    assert cfg.learning_rate == 0.001

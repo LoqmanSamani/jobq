@@ -1,43 +1,139 @@
-# ============================================================================
-# transforms.py — Preprocessing and data augmentation
-# ============================================================================
-#
-# PURPOSE:
-#   Defines all image/point-cloud/bbox transforms used during training and
-#   inference. Keeps transform logic separate from the Dataset so it can be
-#   tested and swapped independently.
-#
-# STRUCTURE / CONTENTS:
-#   1. Resize and normalization
-#      - resize_sample(image, pc, masks, bbox3d, target_size)
-#        → Resize image & point cloud (bilinear), masks (nearest), and
-#          adjust bbox3d if the point cloud coordinates are in pixel space.
-#      - normalize_image(image, mean, std)
-#        → Standard ImageNet normalization or dataset-specific stats.
-#      - normalize_point_cloud(pc)
-#        → Normalize XYZ channels (zero-center, unit-scale or per-axis).
-#
-#   2. Training augmentations
-#      - random_horizontal_flip(image, pc, masks, bbox3d, p=0.5)
-#        → Flip image + mirror X coordinates in bbox3d and point cloud.
-#      - random_color_jitter(image, brightness, contrast, saturation, hue)
-#        → Standard photometric augmentation (does NOT affect geometry).
-#      - random_crop_and_resize(image, pc, masks, bbox3d, scale_range)
-#        → Crop a sub-region, adjust all modalities accordingly.
-#      - random_rotation(image, pc, masks, bbox3d, angle_range)
-#        → Small in-plane rotation; rotate bbox3d corners accordingly.
-#      - gaussian_noise(pc, sigma)
-#        → Add noise to point cloud to improve robustness.
-#
-#   3. Compose helpers
-#      - TrainTransform(config) — chains augmentations + normalization
-#      - ValTransform(config)  — only resize + normalization (no augmentation)
-#
-# NOTES:
-#   - Every geometric augmentation MUST consistently transform image, pc,
-#     masks, AND bbox3d together. This is the trickiest part.
-#   - With only 200 samples, aggressive augmentation is essential to avoid
-#     overfitting. Consider mixup or copy-paste augmentation as well.
-#   - Use albumentations or kornia where convenient, but keep the bbox3d
-#     adjustments manual since they are 3D coordinates.
-# ============================================================================
+"""
+preprocessing and augmentation
+every sample is defined by 4 aspects:
+    - image ()h, w, 3) uint8
+    - point cloud (3, h, w) float64
+    - instance masks (n, h, w) bool
+    - 3d bounding boxes (n, 8, 3) float32
+
+transformations:
+    - train transform: resize + augmentation + normalization
+    - val transform:   resize + normalization (deterministic)
+
+augmentations:
+    - random horizontal flip (geometry + appearance)
+    - random color jitter (appearance only) 
+"""
+
+import cv2
+import numpy as np
+
+
+
+def resize_sample(image, point_cloud, masks, target_h, target_w):
+    """resize sample (image, point cloud, and masks) to a fixed (target_h, target_w)"""
+    
+    image_resized = cv2.resize(image, (target_w, target_h), interpolation=cv2.INTER_LINEAR) # image
+    pc_hwc = point_cloud.transpose(1, 2, 0)
+    pc_hwc_resized = cv2.resize(pc_hwc, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+    pc_resized = pc_hwc_resized.transpose(2, 0, 1) # point cloud
+
+    n_objects = masks.shape[0]
+    masks_resized = np.zeros((n_objects, target_h, target_w), dtype=bool)
+    for i in range(n_objects):
+        m = masks[i].astype(np.uint8) * 255
+        m_resized = cv2.resize(m, (target_w, target_h),interpolation=cv2.INTER_NEAREST)
+        masks_resized[i] = m_resized > 127 # masks
+    return image_resized, pc_resized, masks_resized
+
+
+
+# image net stats are used because out backbone is pretrained on image net !
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+def normalize_image(image):
+    """convert unit8 image to float32 and normalize with image net stats"""
+    
+    img = image.astype(np.float32) / 255.0      
+    img = (img - IMAGENET_MEAN) / IMAGENET_STD     
+    img = img.transpose(2, 0, 1)
+    return img
+
+
+def normalize_point_cloud(point_cloud):
+    """normalize point cloud to zero(mean), unit(std) per sample"""
+    
+    pc = point_cloud.astype(np.float32)
+    mean = pc.mean(axis=(1, 2), keepdims=True)# center each channel independently 
+    pc = pc - mean
+    std = pc.std() + 1e-8 
+    pc = pc / std
+    return pc
+
+
+def random_horizontal_flip(image, point_cloud, masks, p=0.5):
+    """randomly flip image, point cloud and masks horizontally with prob p"""
+    
+    if np.random.rand() < p:
+        image = np.ascontiguousarray(image[:, ::-1, :])
+        point_cloud = np.ascontiguousarray(point_cloud[:, :, ::-1])
+        point_cloud[0] = -point_cloud[0] # x channels should be negated when flipped horizontally
+        masks = np.ascontiguousarray(masks[:, :, ::-1]) 
+    return image, point_cloud, masks
+
+
+def random_color_jitter(image, brightness=0.3, contrast=0.3, saturation=0.3):
+    """change the color of the image randomly"""
+    
+    img = image.astype(np.float32)
+
+    # shift all pixels up/down
+    if brightness > 0:
+        factor = 1.0 + np.random.uniform(-brightness, brightness)
+        img = img * factor
+
+    # scale relative to the mean gray value
+    if contrast > 0:
+        factor = 1.0 + np.random.uniform(-contrast, contrast)
+        mean = img.mean()
+        img = (img - mean) * factor + mean
+
+    # blend toward grayscale
+    if saturation > 0:
+        factor = 1.0 + np.random.uniform(-saturation, saturation)
+        gray = np.mean(img, axis=2, keepdims=True)
+        img = gray + (img - gray) * factor
+
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    return img
+
+
+class TrainTransform:
+    """transform pipeline for training data"""
+
+    def __init__(self, config):
+        self.h = config.image_height
+        self.w = config.image_width
+
+    def __call__(self, image, point_cloud, masks):
+    
+        image, point_cloud, masks = resize_sample(
+            image, point_cloud, masks, self.h, self.w
+        )
+        image, point_cloud, masks = random_horizontal_flip(
+            image, point_cloud, masks, p=0.5
+        )
+        image = random_color_jitter(image)
+        image = normalize_image(image)
+        point_cloud = normalize_point_cloud(point_cloud)
+        
+        return image, point_cloud, masks
+
+
+class ValTransform:
+    """transform pipeline for validation/test data"""
+
+    def __init__(self, config):
+        self.h = config.image_height
+        self.w = config.image_width
+
+    def __call__(self, image, point_cloud, masks):
+        
+        image, point_cloud, masks = resize_sample(
+            image, point_cloud, masks, self.h, self.w
+        )
+        image = normalize_image(image)
+        point_cloud = normalize_point_cloud(point_cloud)
+        
+        return image, point_cloud, masks
