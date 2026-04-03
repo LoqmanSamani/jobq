@@ -1,7 +1,11 @@
 import torch
 import pytest
 from src.config import Config
-from src.model import Backbone, FPNNeck, DetectionHead, BBox3DNet, count_parameters
+from src.model import Backbone, FPNNeck, DetectionHead, BBox3DNet
+from src.utils import count_parameters
+
+
+
 
 
 @pytest.fixture

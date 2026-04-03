@@ -8,157 +8,17 @@ evaluation metrics:
 """
 import torch
 import numpy as np
-from scipy.spatial import ConvexHull
-from scipy.optimize import linear_sum_assignment
+from src.utils import (
+    corner_error,
+    center_error,
+    iou_3d,
+    size_error,
+    match_predictions_to_gt,
+    precision_recall,
+    evaluate_sample,
+)
 
 
-
-def corner_error(pred_corners, gt_corners):
-    """mean corner error: average l2 distance across all 8 corners"""
-    dists = np.linalg.norm(pred_corners - gt_corners, axis=1)
-    return float(dists.mean())
-
-
-
-def center_error(pred_corners, gt_corners):
-    """mean center error: l2 distance between bbox centers (mean of 8 corners)"""
-    pred_center = pred_corners.mean(axis=0)  # (3,)
-    gt_center = gt_corners.mean(axis=0)
-    return float(np.linalg.norm(pred_center - gt_center))
-
-
-def _convex_hull_volume(points):
-    """compute volume of convex hull of a set of 3D points"""
-    if len(points) < 4:
-        return 0.0
-    try:
-        hull = ConvexHull(points)
-        return hull.volume
-    except Exception:
-        return 0.0
-
-
-def iou_3d(pred_corners, gt_corners):
-    """intersection-over-union of 3d convex hulls"""
-    vol_pred = _convex_hull_volume(pred_corners)
-    vol_gt = _convex_hull_volume(gt_corners)
-
-    if vol_pred < 1e-10 or vol_gt < 1e-10:
-        return 0.0
-
-    all_points = np.vstack([pred_corners, gt_corners]) 
-    vol_union_hull = _convex_hull_volume(all_points)
-    if vol_union_hull < 1e-10:
-        return 0.0
-
-    intersection = vol_pred + vol_gt - vol_union_hull
-    intersection = max(0.0, intersection) 
-
-    union = vol_pred + vol_gt - intersection
-    if union < 1e-10:
-        return 0.0
-
-    return float(intersection / union)
-
-
-
-def _box_dimensions(corners):
-    """compute box dimensions (l, w, h) from 8 corners"""
-    edge_groups = [
-        [(0, 1), (3, 2), (4, 5), (7, 6)], 
-        [(0, 3), (1, 2), (4, 7), (5, 6)],  
-        [(0, 4), (1, 5), (2, 6), (3, 7)], 
-    ]
-    dims = []
-    for group in edge_groups:
-        lengths = [np.linalg.norm(corners[i] - corners[j]) for i, j in group]
-        dims.append(float(np.mean(lengths)))
-    return np.array(dims) 
-
-
-def size_error(pred_corners, gt_corners):
-    """l1 error on bbox dimensions (l, w, h)"""
-    pred_dims = _box_dimensions(pred_corners)
-    gt_dims = _box_dimensions(gt_corners)
-    return float(np.abs(pred_dims - gt_dims).mean())
-
-
-
-def match_predictions_to_gt(pred_boxes, gt_boxes, max_dist=0.5):
-    """match predicted boxes to ground-truth using the Hungarian algorithm"""
-    M = pred_boxes.shape[0]
-    N = gt_boxes.shape[0]
-
-    if M == 0 and N == 0:
-        return [], [], []
-    if M == 0:
-        return [], [], list(range(N))
-    if N == 0:
-        return [], list(range(M)), []
-
-    pred_centers = pred_boxes.mean(axis=1) 
-    gt_centers = gt_boxes.mean(axis=1)     
-    cost = np.linalg.norm(pred_centers[:, None] - gt_centers[None, :], axis=2)
-
-    row_idx, col_idx = linear_sum_assignment(cost)
-
-    matches = []
-    matched_preds = set()
-    matched_gts = set()
-
-    for r, c in zip(row_idx, col_idx):
-        if cost[r, c] <= max_dist:
-            matches.append((int(r), int(c)))
-            matched_preds.add(r)
-            matched_gts.add(c)
-
-    false_positives = [i for i in range(M) if i not in matched_preds]
-    false_negatives = [j for j in range(N) if j not in matched_gts]
-
-    return matches, false_positives, false_negatives
-
-
-
-def precision_recall(pred_boxes, gt_boxes, thresholds=(0.1, 0.2, 0.3, 0.5)):
-    """compute precision and recall at multiple center-distance thresholds"""
-    results = {}
-    for t in thresholds:
-        matches, fp, fn = match_predictions_to_gt(pred_boxes, gt_boxes, max_dist=t)
-        tp = len(matches)
-        precision = tp / (tp + len(fp)) if (tp + len(fp)) > 0 else 0.0
-        recall = tp / (tp + len(fn)) if (tp + len(fn)) > 0 else 0.0
-        results[t] = {"precision": precision, "recall": recall}
-    return results
-
-
-
-def evaluate_sample(pred_boxes, gt_boxes, max_dist=0.5):
-    """run all five metrics on one sample"""
-    matches, fp, fn = match_predictions_to_gt(pred_boxes, gt_boxes, max_dist)
-
-    corner_errors = []
-    center_errors = []
-    ious = []
-    size_errors = []
-
-    for pi, gi in matches:
-        corner_errors.append(corner_error(pred_boxes[pi], gt_boxes[gi]))
-        center_errors.append(center_error(pred_boxes[pi], gt_boxes[gi]))
-        ious.append(iou_3d(pred_boxes[pi], gt_boxes[gi]))
-        size_errors.append(size_error(pred_boxes[pi], gt_boxes[gi]))
-
-    pr = precision_recall(pred_boxes, gt_boxes)
-
-    return {
-        "corner_errors": corner_errors,
-        "center_errors": center_errors,
-        "ious": ious,
-        "size_errors": size_errors,
-        "n_matches": len(matches),
-        "n_false_positives": len(fp),
-        "n_false_negatives": len(fn),
-        "precision_recall": pr,
-    }
 
 
 class Evaluator:

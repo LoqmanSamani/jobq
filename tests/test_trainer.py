@@ -6,17 +6,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 import pytest
-
 from src.config import Config
 from src.losses import CombinedLoss
 from src.model import BBox3DNet
-from src.trainer import (
-    build_optimizer,
-    build_scheduler,
-    save_checkpoint,
-    load_checkpoint,
-    Trainer,
-)
+from src.trainer import Trainer
+from src.utils import build_optimizer, build_scheduler, save_checkpoint, load_checkpoint
+
+
 
 
 

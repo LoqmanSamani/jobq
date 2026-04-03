@@ -212,3 +212,6 @@ instruction.md
 /data/
 quiz.txt
 report.md
+
+# outputs (checkpoints, onnx exports, etc.)
+outputs/

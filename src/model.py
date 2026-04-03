@@ -22,11 +22,12 @@ detection heads (three parallel heads on the same fused feat map)
     - offset head:  (b, 2, 64, 96)  — sub-pixel center refinement (y, x)
     - regression head: (b, 24, 64, 96) — 3D bbox corners (8 corners × 3 coords)                                 
 """
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import timm
+
+
 
 
 
@@ -132,9 +133,3 @@ class BBox3DNet(nn.Module):
             "offset": offset,
             "regression": regression,
         }
-
-
-def count_parameters(model):
-    total = sum(p.numel() for p in model.parameters())
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    return total, trainable

@@ -3,7 +3,8 @@ import torch
 import pytest
 from src.config import Config
 from src.model import BBox3DNet
-from src.evaluator import (
+from src.evaluator import Evaluator
+from src.utils import (
     corner_error,
     center_error,
     iou_3d,
@@ -12,8 +13,9 @@ from src.evaluator import (
     match_predictions_to_gt,
     precision_recall,
     evaluate_sample,
-    Evaluator,
 )
+
+
 
 
 def _make_box(center=(0, 0, 0), half=(0.5, 0.5, 0.5)):

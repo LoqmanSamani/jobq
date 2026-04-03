@@ -1,72 +1,8 @@
 import os
-import math
 import torch
-import torch.nn as nn
+from src.utils import build_optimizer, build_scheduler, save_checkpoint, load_checkpoint
 
 
-
-def build_optimizer(model, config):
-    """optimizer with selective weight decay (applied only to non-bias, 
-    non-normalization params, which stabilizes training)
-    """
-    decay_params = []
-    no_decay_params = []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if "bias" in name or "bn" in name or "norm" in name:
-            no_decay_params.append(param)
-        else:
-            decay_params.append(param)
-
-    param_groups = [
-        {"params": decay_params, "weight_decay": config.weight_decay},
-        {"params": no_decay_params, "weight_decay": 0.0},
-    ]
-    return torch.optim.AdamW(param_groups, lr=config.learning_rate)
-
-
-def build_scheduler(optimizer, config):
-    """applies two-phase lr scheduling:
-          - linear warmup for the fisrst warmup epochs (0 -> init lr)
-          - cosine decay for the remaining epochs (init lr -> 0)
-    """
-    warmup = config.warmup_epochs
-    total = config.epochs
-
-    def lr_lambda(epoch):
-        if epoch < warmup:
-            return (epoch + 1) / warmup
-        progress = (epoch - warmup) / max(1, total - warmup)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-
-
-def save_checkpoint(model, optimizer, scheduler, epoch, val_loss, path):
-    """save training state to disk"""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save({
-        "epoch": epoch,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict(),
-        "val_loss": val_loss,
-    }, path)
-
-
-def load_checkpoint(path, model, optimizer=None, scheduler=None):
-    """restore model and optimizer/scheduler from a saved checkpoint and return epoch and val_loss"""
-    
-    ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
-    if optimizer is not None and "optimizer_state_dict" in ckpt:
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-    if scheduler is not None and "scheduler_state_dict" in ckpt:
-        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-        
-    return ckpt.get("epoch", 0), ckpt.get("val_loss", float("inf"))
 
 
 

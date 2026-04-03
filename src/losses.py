@@ -6,29 +6,10 @@ losses:
     - corner variance loss (optional)
     - size consistency loss (optional)
 """
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
-
-def _gather_at_centers(pred, centers_2d, num_objects):
-    """extract predicted values at GT center locations for each object in the batch"""
-    
-    B, C, H, W = pred.shape
-    gathered = []
-    for b in range(B):
-        n = num_objects[b].item()
-        if n == 0:
-            gathered.append(pred.new_zeros(0, C))
-            continue
-        cy = centers_2d[b, :n, 0].long().clamp(0, H - 1) 
-        cx = centers_2d[b, :n, 1].long().clamp(0, W - 1)
-        vals = pred[b, :, cy, cx].permute(1, 0)  # (n, C)
-        gathered.append(vals)
-        
-    return gathered
+from src.utils import _gather_at_centers
 
 
 

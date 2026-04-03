@@ -1,7 +1,6 @@
 import torch
 import pytest
 from src.losses import (
-    _gather_at_centers,
     HeatmapFocalLoss,
     OffsetL1Loss,
     BBox3DCornerLoss,
@@ -9,6 +8,9 @@ from src.losses import (
     SizeConsistencyLoss,
     CombinedLoss,
 )
+from src.utils import _gather_at_centers
+
+
 
 
 @pytest.fixture

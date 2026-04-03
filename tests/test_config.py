@@ -1,8 +1,8 @@
-"""config tests"""
-
 import os
 import pytest
 from src.config import Config
+
+
 
 
 def test_default_config_creates():

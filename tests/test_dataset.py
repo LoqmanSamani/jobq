@@ -3,14 +3,11 @@ import numpy as np
 import torch
 import pytest
 from src.config import Config
-from src.dataset import (
-    get_data_splits,
-    gaussian_2d,
-    generate_heatmap_target,
-    BBox3DDataset,
-    build_dataloaders,
-)
+from src.dataset import BBox3DDataset, build_dataloaders
+from src.utils import get_data_splits, gaussian_2d, generate_heatmap_target
 from src.transforms import ValTransform
+
+
 
 
 @pytest.fixture
