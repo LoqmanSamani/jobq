@@ -22,7 +22,7 @@ class Config:
     # data settings
     image_height: int = 256 # both w and h are chosen to fit in my local
     image_width: int = 384
-    train_ratio: float = 0.7 # 140 
+    train_ratio: float = 0.7 # 140 (this with augmentation should be enough for training)
     val_ratio: float = 0.15  # 30 
     test_ratio: float = 0.15 # 30
     num_workers: int = 2
@@ -34,6 +34,15 @@ class Config:
     weight_decay: float = 1e-4
     epochs: int = 150
     seed: int = 42
+    grad_accum_steps: int = 4   
+    warmup_epochs: int = 5     
+    early_stop_patience: int = 20 
+    use_amp: bool = True
+
+    # loss weights
+    w_heatmap: float = 1.0
+    w_offset: float = 1.0
+    w_corners: float = 0.1
 
     # heatmap generation
     output_stride: int = 4
