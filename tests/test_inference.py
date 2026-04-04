@@ -37,10 +37,16 @@ def dummy_input(config, device):
 
 
 @pytest.fixture
-def dummy_preds(model, dummy_input):
+def dummy_pc(config, device):
+    """single point cloud batch tensor"""
+    return torch.randn(1, 3, config.image_height, config.image_width, device=device)
+
+
+@pytest.fixture
+def dummy_preds(model, dummy_input, dummy_pc):
     """raw model output dict"""
     with torch.no_grad():
-        return model(dummy_input)
+        return model(dummy_input, point_cloud=dummy_pc)
 
 
 @pytest.fixture
@@ -66,10 +72,23 @@ def fake_image(tmp_dir, config):
     return path
 
 
+@pytest.fixture
+def fake_sample_dir(tmp_dir, config):
+    """create a fake sample directory with rgb.jpg and pc.npy"""
+    sample_dir = os.path.join(tmp_dir, "fake_sample")
+    os.makedirs(sample_dir, exist_ok=True)
+    img = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+    cv2.imwrite(os.path.join(sample_dir, "rgb.jpg"), img)
+    pc = np.random.randn(3, 480, 640).astype(np.float64)
+    np.save(os.path.join(sample_dir, "pc.npy"), pc)
+    return sample_dir
+
+
 class TestDecodeHeatmap:
     def test_output_structure(self, dummy_preds):
         results = decode_heatmap(
             dummy_preds["heatmap"], dummy_preds["offset"], dummy_preds["regression"],
+            dummy_preds["center_3d"],
         )
         assert isinstance(results, list)
         assert len(results) == 1  # batch of 1
@@ -81,6 +100,7 @@ class TestDecodeHeatmap:
     def test_shapes(self, dummy_preds):
         results = decode_heatmap(
             dummy_preds["heatmap"], dummy_preds["offset"], dummy_preds["regression"],
+            dummy_preds["center_3d"],
         )
         det = results[0]
         N = len(det["scores"])
@@ -91,6 +111,7 @@ class TestDecodeHeatmap:
     def test_scores_in_range(self, dummy_preds):
         results = decode_heatmap(
             dummy_preds["heatmap"], dummy_preds["offset"], dummy_preds["regression"],
+            dummy_preds["center_3d"],
             conf_thresh=0.0,
         )
         det = results[0]
@@ -100,6 +121,7 @@ class TestDecodeHeatmap:
     def test_top_k_limits_output(self, dummy_preds):
         results = decode_heatmap(
             dummy_preds["heatmap"], dummy_preds["offset"], dummy_preds["regression"],
+            dummy_preds["center_3d"],
             top_k=3, conf_thresh=0.0,
         )
         assert len(results[0]["scores"]) <= 3
@@ -107,10 +129,12 @@ class TestDecodeHeatmap:
     def test_high_threshold_gives_fewer(self, dummy_preds):
         low = decode_heatmap(
             dummy_preds["heatmap"], dummy_preds["offset"], dummy_preds["regression"],
+            dummy_preds["center_3d"],
             conf_thresh=0.0,
         )
         high = decode_heatmap(
             dummy_preds["heatmap"], dummy_preds["offset"], dummy_preds["regression"],
+            dummy_preds["center_3d"],
             conf_thresh=0.9,
         )
         assert len(high[0]["scores"]) <= len(low[0]["scores"])
@@ -120,13 +144,14 @@ class TestDecodeHeatmap:
         H, W = 64, 96
         heatmap = torch.full((1, 1, H, W), -10.0)  # all very low
         offset = torch.zeros(1, 2, H, W)
-        regression = torch.randn(1, 24, H, W)
+        regression = torch.randn(1, 9, H, W)
+        center_3d = torch.randn(1, 3, H, W)
 
         # plant two high-confidence peaks at known locations
         heatmap[0, 0, 10, 20] = 5.0  # sigmoid ≈ 0.993
         heatmap[0, 0, 50, 80] = 4.0  # sigmoid ≈ 0.982
 
-        results = decode_heatmap(heatmap, offset, regression, top_k=10, conf_thresh=0.5)
+        results = decode_heatmap(heatmap, offset, regression, center_3d, top_k=10, conf_thresh=0.5)
         det = results[0]
         assert len(det["scores"]) == 2
 
@@ -140,10 +165,12 @@ class TestDecodeHeatmap:
     def test_batch_multiple_images(self, model, config, device):
         """decode works with batch_size > 1"""
         batch = torch.randn(3, 3, config.image_height, config.image_width, device=device)
+        pc = torch.randn(3, 3, config.image_height, config.image_width, device=device)
         with torch.no_grad():
-            preds = model(batch)
+            preds = model(batch, point_cloud=pc)
         results = decode_heatmap(
             preds["heatmap"], preds["offset"], preds["regression"],
+            preds["center_3d"],
             conf_thresh=0.0,
         )
         assert len(results) == 3
@@ -153,8 +180,9 @@ class TestDecodeHeatmap:
         H, W = 64, 96
         heatmap = torch.full((1, 1, H, W), -10.0)  # sigmoid ≈ 0.0
         offset = torch.zeros(1, 2, H, W)
-        regression = torch.zeros(1, 24, H, W)
-        results = decode_heatmap(heatmap, offset, regression, conf_thresh=0.5)
+        regression = torch.zeros(1, 9, H, W)
+        center_3d = torch.zeros(1, 3, H, W)
+        results = decode_heatmap(heatmap, offset, regression, center_3d, conf_thresh=0.5)
         det = results[0]
         assert len(det["scores"]) == 0
         assert det["corners"].shape == (0, 8, 3)
@@ -206,44 +234,48 @@ class TestPredictor:
         assert predictor.model is not None
         assert not predictor.model.training  # eval mode
 
-    def test_preprocess_shape(self, fake_checkpoint, fake_image, config, device):
+    def test_preprocess_shapes(self, fake_checkpoint, fake_sample_dir, config, device):
         predictor = Predictor(fake_checkpoint, config, device)
-        tensor = predictor.preprocess(fake_image)
-        assert tensor.shape == (1, 3, config.image_height, config.image_width)
-        assert tensor.dtype == torch.float32
+        image_tensor, pc_tensor = predictor.preprocess(fake_sample_dir)
+        assert image_tensor.shape == (1, 3, config.image_height, config.image_width)
+        assert pc_tensor.shape == (1, 3, config.image_height, config.image_width)
+        assert image_tensor.dtype == torch.float32
+        assert pc_tensor.dtype == torch.float32
 
-    def test_preprocess_missing_file(self, fake_checkpoint, config, device):
+    def test_preprocess_missing_dir(self, fake_checkpoint, config, device):
         predictor = Predictor(fake_checkpoint, config, device)
         with pytest.raises(FileNotFoundError):
-            predictor.preprocess("/nonexistent/path.jpg")
+            predictor.preprocess("/nonexistent/sample_dir")
 
     def test_predict_returns_detections(self, fake_checkpoint, config, device):
         predictor = Predictor(fake_checkpoint, config, device)
-        tensor = torch.randn(1, 3, config.image_height, config.image_width, device=device)
-        results = predictor.predict(tensor, conf_thresh=0.0, apply_nms=False)
+        image_tensor = torch.randn(1, 3, config.image_height, config.image_width, device=device)
+        pc_tensor = torch.randn(1, 3, config.image_height, config.image_width, device=device)
+        results = predictor.predict(image_tensor, pc_tensor, conf_thresh=0.0, apply_nms=False)
         assert len(results) == 1
         det = results[0]
         assert "corners" in det and "scores" in det
 
-    def test_predict_image(self, fake_checkpoint, fake_image, config, device):
+    def test_predict_sample(self, fake_checkpoint, fake_sample_dir, config, device):
         predictor = Predictor(fake_checkpoint, config, device)
-        det = predictor.predict_image(fake_image, conf_thresh=0.0, apply_nms=False)
+        det = predictor.predict_sample(fake_sample_dir, conf_thresh=0.0, apply_nms=False)
         assert "corners" in det
         assert "scores" in det
         assert det["corners"].ndim == 3 and det["corners"].shape[1:] == (8, 3)
 
-    def test_predict_batch(self, fake_checkpoint, fake_image, config, device):
+    def test_predict_batch(self, fake_checkpoint, fake_sample_dir, config, device):
         predictor = Predictor(fake_checkpoint, config, device)
         results = predictor.predict_batch(
-            [fake_image, fake_image], conf_thresh=0.0, apply_nms=False,
+            [fake_sample_dir, fake_sample_dir], conf_thresh=0.0, apply_nms=False,
         )
         assert len(results) == 2
 
     def test_predict_with_nms(self, fake_checkpoint, config, device):
         predictor = Predictor(fake_checkpoint, config, device)
-        tensor = torch.randn(1, 3, config.image_height, config.image_width, device=device)
+        image_tensor = torch.randn(1, 3, config.image_height, config.image_width, device=device)
+        pc_tensor = torch.randn(1, 3, config.image_height, config.image_width, device=device)
         # with NMS enabled (default)
-        results = predictor.predict(tensor, conf_thresh=0.0, apply_nms=True)
+        results = predictor.predict(image_tensor, pc_tensor, conf_thresh=0.0, apply_nms=True)
         assert len(results) == 1
 
 
@@ -268,11 +300,13 @@ class TestOnnxExport:
         export_to_onnx(model, config, path)
 
         session = ort.InferenceSession(path)
-        dummy = np.random.randn(3, 3, config.image_height, config.image_width).astype(np.float32)
-        outputs = session.run(None, {"image": dummy})
+        dummy_image = np.random.randn(3, 3, config.image_height, config.image_width).astype(np.float32)
+        dummy_pc = np.random.randn(3, 3, config.image_height, config.image_width).astype(np.float32)
+        outputs = session.run(None, {"image": dummy_image, "point_cloud": dummy_pc})
         assert outputs[0].shape[0] == 3  # heatmap batch dim
         assert outputs[1].shape[0] == 3  # offset batch dim
         assert outputs[2].shape[0] == 3  # regression batch dim
+        assert outputs[3].shape[0] == 3  # center_3d batch dim
 
 
 class TestFp16Export:

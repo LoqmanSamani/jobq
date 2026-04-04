@@ -6,6 +6,7 @@ from src.losses import (
     BBox3DCornerLoss,
     CornerVarianceLoss,
     SizeConsistencyLoss,
+    HalfEdgeLoss,
     CombinedLoss,
 )
 from src.utils import _gather_at_centers
@@ -19,12 +20,22 @@ def batch():
     B, H, W = 2, 8, 12
     max_obj = 5
     torch.manual_seed(0)
+    bbox3d = torch.randn(B, max_obj, 8, 3)
+    center_3d = bbox3d.mean(dim=2)  # (B, max_obj, 3)
+    # half-edge vectors: h1=(c1-c0)/2, h2=(c3-c0)/2, h3=(c4-c0)/2
+    h1 = (bbox3d[:, :, 1, :] - bbox3d[:, :, 0, :]) / 2
+    h2 = (bbox3d[:, :, 3, :] - bbox3d[:, :, 0, :]) / 2
+    h3 = (bbox3d[:, :, 4, :] - bbox3d[:, :, 0, :]) / 2
+    half_edges = torch.stack([h1, h2, h3], dim=2).reshape(B, max_obj, 9)
     return {
         "pred_heatmap": torch.randn(B, 1, H, W, requires_grad=True),
         "gt_heatmap": torch.zeros(B, 1, H, W),
         "pred_offset": torch.randn(B, 2, H, W, requires_grad=True),
-        "pred_reg": torch.randn(B, 24, H, W, requires_grad=True),
-        "bbox3d": torch.randn(B, max_obj, 8, 3),
+        "pred_reg": torch.randn(B, 9, H, W, requires_grad=True),
+        "pred_center": torch.randn(B, 3, H, W, requires_grad=True),
+        "bbox3d": bbox3d,
+        "half_edges": half_edges,
+        "center_3d": center_3d,
         "centers_2d": torch.tensor([
             [[3.5, 5.2], [6.1, 9.8], [1.0, 2.0], [0.0, 0.0], [0.0, 0.0]],
             [[4.0, 7.0], [2.3, 3.7], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
@@ -49,8 +60,8 @@ def test_gather_channel_dim(batch):
     result = _gather_at_centers(
         batch["pred_reg"], batch["centers_2d"], batch["num_objects"]
     )
-    assert result[0].shape[1] == 24
-    assert result[1].shape[1] == 24
+    assert result[0].shape[1] == 9
+    assert result[1].shape[1] == 9
 
 
 def test_gather_zero_objects():
@@ -184,15 +195,22 @@ def test_corner_loss_increases_with_error():
         assert losses[i] < losses[i + 1], f"loss[{i}]={losses[i]} >= loss[{i+1}]={losses[i+1]}"
 
 
-def test_corner_loss_gradient(batch):
+def test_corner_loss_gradient():
     """gradients should flow to pred_reg"""
+    B, H, W, max_obj = 2, 8, 12, 5
+    torch.manual_seed(0)
+    pred_reg = torch.randn(B, 24, H, W, requires_grad=True)
+    bbox3d = torch.randn(B, max_obj, 8, 3)
+    centers_2d = torch.tensor([
+        [[3.5, 5.2], [6.1, 9.8], [1.0, 2.0], [0.0, 0.0], [0.0, 0.0]],
+        [[4.0, 7.0], [2.3, 3.7], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+    ])
+    num_objects = torch.tensor([3, 2])
     loss_fn = BBox3DCornerLoss()
-    loss = loss_fn(
-        batch["pred_reg"], batch["bbox3d"], batch["centers_2d"], batch["num_objects"]
-    )
+    loss = loss_fn(pred_reg, bbox3d, centers_2d, num_objects)
     loss.backward()
-    assert batch["pred_reg"].grad is not None
-    assert torch.isfinite(batch["pred_reg"].grad).all()
+    assert pred_reg.grad is not None
+    assert torch.isfinite(pred_reg.grad).all()
 
 
 
@@ -209,10 +227,17 @@ def test_variance_loss_identical_corners():
     assert loss.item() < 1e-5
 
 
-def test_variance_loss_positive(batch):
+def test_variance_loss_positive():
     """random corners should have positive variance"""
+    B, H, W, max_obj = 2, 8, 12, 5
+    pred_reg = torch.randn(B, 24, H, W)
+    centers_2d = torch.tensor([
+        [[3.5, 5.2], [6.1, 9.8], [1.0, 2.0], [0.0, 0.0], [0.0, 0.0]],
+        [[4.0, 7.0], [2.3, 3.7], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+    ])
+    num_objects = torch.tensor([3, 2])
     loss_fn = CornerVarianceLoss()
-    loss = loss_fn(batch["pred_reg"], batch["centers_2d"], batch["num_objects"])
+    loss = loss_fn(pred_reg, centers_2d, num_objects)
     assert loss.item() > 0
 
 
@@ -230,12 +255,18 @@ def test_size_loss_perfect_match():
     assert loss.item() < 1e-5
 
 
-def test_size_loss_positive(batch):
+def test_size_loss_positive():
     """mismatched corners should give positive size loss"""
+    B, H, W, max_obj = 2, 8, 12, 5
+    pred_reg = torch.randn(B, 24, H, W)
+    bbox3d = torch.randn(B, max_obj, 8, 3)
+    centers_2d = torch.tensor([
+        [[3.5, 5.2], [6.1, 9.8], [1.0, 2.0], [0.0, 0.0], [0.0, 0.0]],
+        [[4.0, 7.0], [2.3, 3.7], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+    ])
+    num_objects = torch.tensor([3, 2])
     loss_fn = SizeConsistencyLoss()
-    loss = loss_fn(
-        batch["pred_reg"], batch["bbox3d"], batch["centers_2d"], batch["num_objects"]
-    )
+    loss = loss_fn(pred_reg, bbox3d, centers_2d, num_objects)
     assert loss.item() > 0
 
 
@@ -246,10 +277,12 @@ def test_combined_loss_returns_dict(batch):
         "heatmap": batch["pred_heatmap"],
         "offset": batch["pred_offset"],
         "regression": batch["pred_reg"],
+        "center_3d": batch["pred_center"],
     }
     targets = {
         "heatmap": batch["gt_heatmap"],
-        "bbox3d": batch["bbox3d"],
+        "half_edges": batch["half_edges"],
+        "center_3d": batch["center_3d"],
         "centers_2d": batch["centers_2d"],
         "num_objects": batch["num_objects"],
     }
@@ -258,6 +291,7 @@ def test_combined_loss_returns_dict(batch):
     assert "heatmap" in loss_dict
     assert "offset" in loss_dict
     assert "corners" in loss_dict
+    assert "center" in loss_dict
     assert "total" in loss_dict
 
 
@@ -268,10 +302,12 @@ def test_combined_loss_all_nonnegative(batch):
         "heatmap": batch["pred_heatmap"],
         "offset": batch["pred_offset"],
         "regression": batch["pred_reg"],
+        "center_3d": batch["pred_center"],
     }
     targets = {
         "heatmap": batch["gt_heatmap"],
-        "bbox3d": batch["bbox3d"],
+        "half_edges": batch["half_edges"],
+        "center_3d": batch["center_3d"],
         "centers_2d": batch["centers_2d"],
         "num_objects": batch["num_objects"],
     }
@@ -287,10 +323,12 @@ def test_combined_loss_gradient_flows(batch):
         "heatmap": batch["pred_heatmap"],
         "offset": batch["pred_offset"],
         "regression": batch["pred_reg"],
+        "center_3d": batch["pred_center"],
     }
     targets = {
         "heatmap": batch["gt_heatmap"],
-        "bbox3d": batch["bbox3d"],
+        "half_edges": batch["half_edges"],
+        "center_3d": batch["center_3d"],
         "centers_2d": batch["centers_2d"],
         "num_objects": batch["num_objects"],
     }
@@ -299,23 +337,33 @@ def test_combined_loss_gradient_flows(batch):
     assert batch["pred_heatmap"].grad is not None
     assert batch["pred_offset"].grad is not None
     assert batch["pred_reg"].grad is not None
+    assert batch["pred_center"].grad is not None
 
 
 def test_combined_loss_zero_weight_disables():
     """setting a weight to 0 should make that component = 0 contribution"""
     loss_fn = CombinedLoss(w_heatmap=0.0, w_offset=1.0, w_corners=1.0)
     B, H, W = 1, 8, 12
+    max_obj = 5
     torch.manual_seed(0)
+    bbox3d = torch.randn(B, max_obj, 8, 3)
+    center_3d_gt = bbox3d.mean(dim=2)
+    h1 = (bbox3d[:, :, 1, :] - bbox3d[:, :, 0, :]) / 2
+    h2 = (bbox3d[:, :, 3, :] - bbox3d[:, :, 0, :]) / 2
+    h3 = (bbox3d[:, :, 4, :] - bbox3d[:, :, 0, :]) / 2
+    half_edges = torch.stack([h1, h2, h3], dim=2).reshape(B, max_obj, 9)
     preds = {
         "heatmap": torch.randn(B, 1, H, W),
         "offset": torch.randn(B, 2, H, W),
-        "regression": torch.randn(B, 24, H, W),
+        "regression": torch.randn(B, 9, H, W),
+        "center_3d": torch.randn(B, 3, H, W),
     }
     gt = torch.zeros(B, 1, H, W)
     gt[0, 0, 4, 6] = 1.0
     targets = {
         "heatmap": gt,
-        "bbox3d": torch.randn(B, 5, 8, 3),
+        "half_edges": half_edges,
+        "center_3d": center_3d_gt,
         "centers_2d": torch.tensor([[[4.0, 6.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]]),
         "num_objects": torch.tensor([1]),
     }
@@ -327,37 +375,56 @@ def test_combined_loss_zero_weight_disables():
     assert total_with_heatmap_off.item() != total_with_heatmap_on.item()
 
 
-def test_combined_loss_with_optional_losses(batch):
-    """enabling optional losses should add extra keys to loss_dict"""
-    loss_fn = CombinedLoss(w_variance=0.01, w_size=0.01)
-    preds = {
-        "heatmap": batch["pred_heatmap"],
-        "offset": batch["pred_offset"],
-        "regression": batch["pred_reg"],
-    }
-    targets = {
-        "heatmap": batch["gt_heatmap"],
-        "bbox3d": batch["bbox3d"],
-        "centers_2d": batch["centers_2d"],
-        "num_objects": batch["num_objects"],
-    }
-    total, loss_dict = loss_fn(preds, targets)
-    assert "variance" in loss_dict
-    assert "size" in loss_dict
-    assert torch.isfinite(total)
+def test_half_edge_loss_perfect():
+    """perfect prediction should yield ~0 loss"""
+    loss_fn = HalfEdgeLoss()
+    B, H, W = 1, 8, 12
+    max_obj = 3
+    gt_half_edges = torch.randn(B, max_obj, 9)
+    centers = torch.tensor([[[4.0, 6.0], [2.0, 3.0], [0.0, 0.0]]])
+    num_obj = torch.tensor([2])
+    pred_reg = torch.zeros(B, 9, H, W)
+    pred_reg[0, :, 4, 6] = gt_half_edges[0, 0]
+    pred_reg[0, :, 2, 3] = gt_half_edges[0, 1]
+    loss = loss_fn(pred_reg, gt_half_edges, centers, num_obj)
+    assert loss.item() < 1e-5
+
+
+def test_half_edge_loss_positive(batch):
+    """random predictions should give positive loss"""
+    loss_fn = HalfEdgeLoss()
+    loss = loss_fn(
+        batch["pred_reg"], batch["half_edges"],
+        batch["centers_2d"], batch["num_objects"]
+    )
+    assert loss.item() > 0
+
+
+def test_half_edge_loss_gradient(batch):
+    """gradients should flow through half-edge loss"""
+    loss_fn = HalfEdgeLoss()
+    loss = loss_fn(
+        batch["pred_reg"], batch["half_edges"],
+        batch["centers_2d"], batch["num_objects"]
+    )
+    loss.backward()
+    assert batch["pred_reg"].grad is not None
+    assert torch.isfinite(batch["pred_reg"].grad).all()
 
 
 def test_combined_loss_finite_on_random(batch):
     """combined loss should never produce NaN or Inf on random inputs"""
-    loss_fn = CombinedLoss(w_variance=0.1, w_size=0.1)
+    loss_fn = CombinedLoss()
     preds = {
         "heatmap": batch["pred_heatmap"],
         "offset": batch["pred_offset"],
         "regression": batch["pred_reg"],
+        "center_3d": batch["pred_center"],
     }
     targets = {
         "heatmap": batch["gt_heatmap"],
-        "bbox3d": batch["bbox3d"],
+        "half_edges": batch["half_edges"],
+        "center_3d": batch["center_3d"],
         "centers_2d": batch["centers_2d"],
         "num_objects": batch["num_objects"],
     }

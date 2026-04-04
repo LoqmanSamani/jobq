@@ -57,9 +57,9 @@ def test_split_sizes(config):
     )
     total = len(train) + len(val) + len(test)
     assert total == 200
-    assert len(train) == 140   # 0.7 * 200
-    assert len(val) == 30      # 0.15 * 200
-    assert len(test) == 30     # 0.15 * 200
+    assert len(train) == 160   # 0.8 * 200
+    assert len(val) == 20      # 0.1 * 200
+    assert len(test) == 20     # 0.1 * 200
 
 
 def test_gaussian_2d_peak_at_center():
@@ -149,6 +149,7 @@ def test_dataset_single_sample_shapes(config):
     assert sample["point_cloud"].shape == (3, H, W)
     assert sample["heatmap"].shape == (1, oH, oW)
     assert sample["bbox3d"].shape == (M, 8, 3)
+    assert sample["half_edges"].shape == (M, 9)
     assert sample["centers_2d"].shape == (M, 2)
     assert sample["masks"].shape == (M, H, W)
     assert sample["num_objects"].dim() == 0  # scalar
@@ -211,4 +212,4 @@ def test_dataloader_full_epoch(config):
     for batch in train_loader:
         count += batch["image"].shape[0]
     assert count > 0
-    assert count <= 140
+    assert count <= 160

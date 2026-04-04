@@ -7,11 +7,86 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
-from scipy.spatial import ConvexHull
-from scipy.optimize import linear_sum_assignment
+from scipy.spatial import ConvexHull, HalfspaceIntersection
+from scipy.optimize import linear_sum_assignment, linprog
 import onnxruntime as ort
 import onnx
 from onnx import numpy_helper
+
+
+
+# sign pattern for reconstructing 8 cuboid corners from 3 half-edge vectors
+CORNER_SIGNS = np.array([
+    [-1, -1, -1],  # c0
+    [+1, -1, -1],  # c1
+    [+1, +1, -1],  # c2
+    [-1, +1, -1],  # c3
+    [-1, -1, +1],  # c4
+    [+1, -1, +1],  # c5
+    [+1, +1, +1],  # c6
+    [-1, +1, +1],  # c7
+], dtype=np.float32)  # (8, 3)
+
+CORNER_SIGNS_TORCH = torch.from_numpy(CORNER_SIGNS)  # (8, 3)
+
+
+# all 6 permutations of 3 elements (for canonicalization)
+_PERMS_3 = [(0,1,2), (0,2,1), (1,0,2), (1,2,0), (2,0,1), (2,1,0)]
+
+
+def canonicalize_half_edges(h1, h2, h3):
+    """canonicalize 3 half-edge vectors to remove the 48-fold sign/permutation ambiguity"""
+    vectors = np.stack([h1, h2, h3])  # (3, 3) or (3, n, 3)
+    single = vectors.ndim == 2  # single object vs batch
+
+    if single:
+        # for a single (3, 3) matrix: try all 6 permutations
+        best_score = -1.0
+        best_perm = (0, 1, 2)
+        for perm in _PERMS_3:
+            score = sum(abs(vectors[perm[i], i]) for i in range(3))
+            if score > best_score:
+                best_score = score
+                best_perm = perm
+        ordered = vectors[list(best_perm)]
+        for i in range(3):
+            if ordered[i, i] < 0:
+                ordered[i] = -ordered[i]
+        return ordered[0], ordered[1], ordered[2]
+    else:
+        # batch version: vectors is (3, n, 3)
+        n = vectors.shape[1]
+        result = np.zeros_like(vectors)
+        for obj in range(n):
+            v = vectors[:, obj, :]  # (3, 3)
+            best_score = -1.0
+            best_perm = (0, 1, 2)
+            for perm in _PERMS_3:
+                score = sum(abs(v[perm[i], i]) for i in range(3))
+                if score > best_score:
+                    best_score = score
+                    best_perm = perm
+            ordered = v[list(best_perm)]
+            for i in range(3):
+                if ordered[i, i] < 0:
+                    ordered[i] = -ordered[i]
+            result[:, obj, :] = ordered
+        return result[0], result[1], result[2]
+
+
+def reconstruct_corners_np(center, half_edges):
+    """reconstruct 8 cuboid corners from center + half-edge vectors (numpy)"""
+    H = half_edges.reshape(-1, 3, 3)  # (n, 3, 3): rows are h1, h2, h3
+    offsets = np.einsum('ij,njk->nik', CORNER_SIGNS, H)  # (n, 8, 3)
+    return center[:, None, :] + offsets
+
+
+def reconstruct_corners_torch(center, half_edges):
+    """reconstruct 8 cuboid corners from center + half-edge vectors (torch)"""
+    H = half_edges.reshape(-1, 3, 3)  # (n, 3, 3)
+    signs = CORNER_SIGNS_TORCH.to(half_edges.device)  # (8, 3)
+    offsets = torch.einsum('ij,njk->nik', signs, H)  # (n, 8, 3)
+    return center[:, None, :] + offsets
 
 
 
@@ -74,7 +149,7 @@ def gaussian_2d(shape, sigma=1.0):
     return kernel
 
 
-def generate_heatmap_target(masks, output_h, output_w, min_radius=2):
+def generate_heatmap_target(masks, output_h, output_w, min_radius=2, sigma_divisor=6.0):
     """generate a center net-style heatmap target from instance masks"""
     
     n_objects = masks.shape[0]
@@ -101,7 +176,7 @@ def generate_heatmap_target(masks, output_h, output_w, min_radius=2):
         radius = max(min_radius, int(math.sqrt(obj_h * obj_w) / 2))
 
         diameter = 2 * radius + 1
-        sigma = diameter / 6.0  # 6σ covers the full diameter
+        sigma = diameter / sigma_divisor  # default 6σ covers the full diameter
         gaussian = gaussian_2d((diameter, diameter), sigma)
 
         cy_int = int(round(cy))
@@ -198,7 +273,6 @@ def save_checkpoint(model, optimizer, scheduler, epoch, val_loss, path):
 
 def load_checkpoint(path, model, optimizer=None, scheduler=None):
     """restore model and optimizer/scheduler from a saved checkpoint and return epoch and val_loss"""
-    
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     if optimizer is not None and "optimizer_state_dict" in ckpt:
@@ -211,9 +285,10 @@ def load_checkpoint(path, model, optimizer=None, scheduler=None):
 
 
 def corner_error(pred_corners, gt_corners):
-    """mean corner error: average l2 distance across all 8 corners"""
-    dists = np.linalg.norm(pred_corners - gt_corners, axis=1)
-    return float(dists.mean())
+    """mean corner error: average l2 distance with optimal corner assignment"""
+    cost = np.linalg.norm(pred_corners[:, None] - gt_corners[None, :], axis=2)
+    row_idx, col_idx = linear_sum_assignment(cost)
+    return float(cost[row_idx, col_idx].mean())
 
 
 
@@ -235,42 +310,70 @@ def _convex_hull_volume(points):
         return 0.0
 
 
+def _intersection_volume(hull_a, hull_b):
+    """compute the volume of the intersection of two convex hulls in 3d"""
+    halfspaces = np.vstack([hull_a.equations, hull_b.equations])
+    normals = halfspaces[:, :-1]
+    offsets = halfspaces[:, -1]
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
+
+    n_dim = normals.shape[1]
+    c = np.zeros(n_dim + 1)
+    c[-1] = -1  # maximize r
+
+    A_lp = np.hstack([normals, norms])
+    b_lp = -offsets
+
+    bounds = [(None, None)] * n_dim + [(0, None)]
+    result = linprog(c, A_ub=A_lp, b_ub=b_lp, bounds=bounds, method="highs")
+
+    if not result.success or result.x[-1] < 1e-10:
+        return 0.0  # intersection is empty or degenerate
+
+    interior_point = result.x[:n_dim]
+
+    try:
+        hs = HalfspaceIntersection(halfspaces, interior_point)
+        inter_hull = ConvexHull(hs.intersections)
+        return max(0.0, inter_hull.volume)
+    except Exception:
+        return 0.0
+
+
 def iou_3d(pred_corners, gt_corners):
-    """intersection-over-union of 3d convex hulls"""
-    vol_pred = _convex_hull_volume(pred_corners)
-    vol_gt = _convex_hull_volume(gt_corners)
+    """intersection-over-union of 3d convex hulls using proper
+    halfspace intersection for accurate volume computation
+    """
+    try:
+        hull_pred = ConvexHull(pred_corners)
+    except Exception:
+        return 0.0
+    try:
+        hull_gt = ConvexHull(gt_corners)
+    except Exception:
+        return 0.0
+
+    vol_pred = hull_pred.volume
+    vol_gt = hull_gt.volume
 
     if vol_pred < 1e-10 or vol_gt < 1e-10:
         return 0.0
 
-    all_points = np.vstack([pred_corners, gt_corners]) 
-    vol_union_hull = _convex_hull_volume(all_points)
-    if vol_union_hull < 1e-10:
+    inter_vol = _intersection_volume(hull_pred, hull_gt)
+    union_vol = vol_pred + vol_gt - inter_vol
+
+    if union_vol < 1e-10:
         return 0.0
 
-    intersection = vol_pred + vol_gt - vol_union_hull
-    intersection = max(0.0, intersection) 
-
-    union = vol_pred + vol_gt - intersection
-    if union < 1e-10:
-        return 0.0
-
-    return float(intersection / union)
+    return float(inter_vol / union_vol)
 
 
 
 def _box_dimensions(corners):
-    """compute box dimensions (l, w, h) from 8 corners"""
-    edge_groups = [
-        [(0, 1), (3, 2), (4, 5), (7, 6)], 
-        [(0, 3), (1, 2), (4, 7), (5, 6)],  
-        [(0, 4), (1, 5), (2, 6), (3, 7)], 
-    ]
-    dims = []
-    for group in edge_groups:
-        lengths = [np.linalg.norm(corners[i] - corners[j]) for i, j in group]
-        dims.append(float(np.mean(lengths)))
-    return np.array(dims) 
+    """compute box dimensions (l, w, h) from 8 corners, ordering-agnostic"""
+    centered = corners - corners.mean(axis=0)
+    _, s, _ = np.linalg.svd(centered, full_matrices=False)
+    return np.sort(s / np.sqrt(2.0))
 
 
 def size_error(pred_corners, gt_corners):
@@ -359,9 +462,8 @@ def evaluate_sample(pred_boxes, gt_boxes, max_dist=0.5):
 
 
 
-def decode_heatmap(heatmap, offset, regression, top_k=25, conf_thresh=0.3):
+def decode_heatmap(heatmap, offset, regression, center_3d, top_k=25, conf_thresh=0.3):
     """extract detections from raw model output maps"""
-    
     heatmap = heatmap.sigmoid()
     hmax = F.max_pool2d(heatmap, kernel_size=3, stride=1, padding=1)
     heatmap = heatmap * (heatmap == hmax).float()
@@ -387,12 +489,16 @@ def decode_heatmap(heatmap, offset, regression, top_k=25, conf_thresh=0.3):
         ys = (topk_idx // W).float()
         xs = (topk_idx % W).float()
         # apply sub-pixel offsets
-        off = offset[b, :, ys.long(), xs.long()]  # (2, N)
+        off = offset[b, :, ys.long(), xs.long()]  # (2, n)
         ys_refined = ys + off[0]
         xs_refined = xs + off[1]
-        # read regression values for detected peaks
-        reg = regression[b, :, topk_idx // W, topk_idx % W] 
-        corners = reg.permute(1, 0).reshape(-1, 8, 3) 
+        # read regression (half-edge vectors) and center_3d at detected peaks
+        reg = regression[b, :, topk_idx // W, topk_idx % W]  # (9, n)
+        half_edges = reg.permute(1, 0)  # (n, 9)
+        ctr = center_3d[b, :, topk_idx // W, topk_idx % W]  # (3, n)
+        ctr = ctr.permute(1, 0)  # (n, 3)
+        # reconstruct absolute corners from center + half-edge vectors
+        corners = reconstruct_corners_torch(ctr, half_edges)  # (n, 8, 3)
         centers_hm = torch.stack([ys_refined, xs_refined], dim=1)
         results.append({
             "corners": corners.detach().cpu().numpy(),
@@ -406,7 +512,6 @@ def decode_heatmap(heatmap, offset, regression, top_k=25, conf_thresh=0.3):
 
 def nms_3d(corners, scores, iou_threshold=0.25):
     """greedy 3d nms using convex-hull iou from evaluator.iou_3d"""
-    
     if len(scores) == 0:
         return []
 
@@ -429,26 +534,28 @@ def nms_3d(corners, scores, iou_threshold=0.25):
 
 
 def export_to_onnx(model, config, output_path, opset_version=17):
-    """export model to ONNX with dynamic batch dimension"""
-    
+    """export model to ONNX with dynamic batch dimension""" 
     model.eval()
     device = next(model.parameters()).device
-    dummy = torch.randn(1, 3, config.image_height, config.image_width, device=device)
+    dummy_image = torch.randn(1, 3, config.image_height, config.image_width, device=device)
+    dummy_pc = torch.randn(1, 3, config.image_height, config.image_width, device=device)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     torch.onnx.export(
         model,
-        (dummy,),
+        (dummy_image, dummy_pc),
         output_path,
         opset_version=opset_version,
-        input_names=["image"],
-        output_names=["heatmap", "offset", "regression"],
+        input_names=["image", "point_cloud"],
+        output_names=["heatmap", "offset", "regression", "center_3d"],
         dynamic_axes={
             "image": {0: "batch"},
+            "point_cloud": {0: "batch"},
             "heatmap": {0: "batch"},
             "offset": {0: "batch"},
             "regression": {0: "batch"},
+            "center_3d": {0: "batch"},
         },
     )
     return output_path
@@ -461,18 +568,21 @@ def validate_onnx(onnx_path, model, config, atol=1e-4):
     """
     model.eval()
     device = next(model.parameters()).device
-    dummy = torch.randn(1, 3, config.image_height, config.image_width, device=device)
+    dummy_image = torch.randn(1, 3, config.image_height, config.image_width, device=device)
+    dummy_pc = torch.randn(1, 3, config.image_height, config.image_width, device=device)
 
     # pytorch forward
     with torch.no_grad():
-        pt_out = model(dummy)
+        pt_out = model(dummy_image, point_cloud=dummy_pc)
 
     # onnx forward
     session = ort.InferenceSession(onnx_path)
-    dummy_np = dummy.cpu().numpy()
-    ort_out = session.run(None, {"image": dummy_np})
+    ort_out = session.run(None, {
+        "image": dummy_image.cpu().numpy(),
+        "point_cloud": dummy_pc.cpu().numpy(),
+    })
 
-    names = ["heatmap", "offset", "regression"]
+    names = ["heatmap", "offset", "regression", "center_3d"]
     diffs = {}
     all_match = True
     for name, ort_val in zip(names, ort_out):
@@ -487,8 +597,7 @@ def validate_onnx(onnx_path, model, config, atol=1e-4):
 
 
 def export_to_fp16_onnx(model, config, output_path, opset_version=17):
-    """export model to FP16 ONNX for faster inference on GPU"""
-    
+    """export model to FP16 ONNX for faster inference on gpu"""
     # first export fp32 to a temp path
     fp32_path = output_path.replace(".onnx", "_fp32_tmp.onnx")
     export_to_onnx(model, config, fp32_path, opset_version)

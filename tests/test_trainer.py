@@ -17,11 +17,20 @@ from src.utils import build_optimizer, build_scheduler, save_checkpoint, load_ch
 
 
 def _make_fake_batch(B=2, H=256, W=384, out_h=64, out_w=96, max_obj=5):
+    bbox3d = torch.randn(B, max_obj, 8, 3)
+    center_3d = bbox3d.mean(dim=2)  # (B, max_obj, 3)
+    # half-edge vectors: h1=(c1-c0)/2, h2=(c3-c0)/2, h3=(c4-c0)/2
+    h1 = (bbox3d[:, :, 1, :] - bbox3d[:, :, 0, :]) / 2
+    h2 = (bbox3d[:, :, 3, :] - bbox3d[:, :, 0, :]) / 2
+    h3 = (bbox3d[:, :, 4, :] - bbox3d[:, :, 0, :]) / 2
+    half_edges = torch.stack([h1, h2, h3], dim=2).reshape(B, max_obj, 9)
     return {
         "image": torch.randn(B, 3, H, W),
         "point_cloud": torch.randn(B, 3, H, W),
         "heatmap": torch.zeros(B, 1, out_h, out_w),
-        "bbox3d": torch.randn(B, max_obj, 8, 3),
+        "bbox3d": bbox3d,
+        "half_edges": half_edges,
+        "center_3d": center_3d,
         "centers_2d": torch.zeros(B, max_obj, 2),
         "masks": torch.zeros(B, max_obj, H, W),
         "num_objects": torch.tensor([1, 1]),
@@ -131,11 +140,12 @@ def test_save_and_load_checkpoint():
         assert loaded_epoch == 10
         assert loaded_loss == 0.5
         x = torch.randn(1, 3, config.image_height, config.image_width)
+        pc = torch.randn(1, 3, config.image_height, config.image_width)
         model1.eval()
         model2.eval()
         with torch.no_grad():
-            out1 = model1(x)
-            out2 = model2(x)
+            out1 = model1(x, point_cloud=pc)
+            out2 = model2(x, point_cloud=pc)
         for key in out1:
             assert torch.allclose(out1[key], out2[key], atol=1e-6), f"Mismatch in {key}"
 
@@ -171,6 +181,7 @@ def test_train_one_epoch_has_loss_components(setup):
     assert "heatmap" in losses
     assert "offset" in losses
     assert "corners" in losses
+    assert "center" in losses
 
 
 def test_validate_returns_losses(setup):
@@ -231,8 +242,9 @@ def test_overfit_single_sample():
     trainer.optimizer.zero_grad()
     for i, batch in enumerate(train_loader):
         image = batch["image"]
-        targets = {k: batch[k] for k in ["heatmap", "bbox3d", "centers_2d", "num_objects"]}
-        preds = model(image)
+        point_cloud = batch["point_cloud"] if "point_cloud" in batch else None
+        targets = {k: batch[k] for k in ["heatmap", "half_edges", "center_3d", "centers_2d", "num_objects"]}
+        preds = model(image, point_cloud=point_cloud)
         loss, ld = loss_fn(preds, targets)
         loss.backward()
         trainer.optimizer.step()

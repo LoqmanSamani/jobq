@@ -16,6 +16,7 @@ from src.utils import (
     match_predictions_to_gt,
     precision_recall,
     evaluate_sample,
+    reconstruct_corners_torch,
 )
 
 
@@ -25,14 +26,14 @@ class Evaluator:
     """runs the model over a DataLoader, decodes predictions,
        matches them to ground truth, and aggregates metrics.
     """
-    def __init__(self, model, loader, config, device, top_k=25, conf_thresh=0.3, max_dist=0.5):
+    def __init__(self, model, loader, config, device, top_k=None, conf_thresh=None, max_dist=None):
         self.model = model
         self.loader = loader
         self.config = config
         self.device = device
-        self.top_k = top_k
-        self.conf_thresh = conf_thresh
-        self.max_dist = max_dist
+        self.top_k = top_k if top_k is not None else config.top_k
+        self.conf_thresh = conf_thresh if conf_thresh is not None else config.conf_thresh
+        self.max_dist = max_dist if max_dist is not None else config.match_dist
 
     @staticmethod
     def _nms_heatmap(heatmap, kernel=3):
@@ -72,8 +73,11 @@ class Evaluator:
             ys = ys + offsets[0]
             xs = xs + offsets[1]
 
-            reg = preds["regression"][b, :, topk_idx // W, topk_idx % W] 
-            corners = reg.permute(1, 0).reshape(-1, 8, 3) 
+            reg = preds["regression"][b, :, topk_idx // W, topk_idx % W]  # (9, n)
+            half_edges = reg.permute(1, 0)  # (n, 9)
+            ctr = preds["center_3d"][b, :, topk_idx // W, topk_idx % W]  # (3, n)
+            ctr = ctr.permute(1, 0)  # (n, 3)
+            corners = reconstruct_corners_torch(ctr, half_edges)  # (n, 8, 3)
 
             all_boxes.append(corners.detach().cpu().numpy())
             all_scores.append(topk_scores.detach().cpu().numpy())
@@ -87,7 +91,8 @@ class Evaluator:
         with torch.no_grad():
             for batch in self.loader:
                 image = batch["image"].to(self.device)
-                preds = self.model(image)
+                point_cloud = batch["point_cloud"].to(self.device) if "point_cloud" in batch else None
+                preds = self.model(image, point_cloud=point_cloud)
                 pred_boxes_list, pred_scores_list = self._decode_predictions(preds)
                 gt_bbox3d = batch["bbox3d"].numpy()
                 num_objects = batch["num_objects"].numpy()

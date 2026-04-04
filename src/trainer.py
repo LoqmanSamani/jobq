@@ -33,22 +33,23 @@ class Trainer:
 
     def train_one_epoch(self, epoch):
         """run one full pass over the training set"""
-        
         self.model.train()
         running = {} 
         n_batches = 0
         self.optimizer.zero_grad()
         for i, batch in enumerate(self.train_loader):
             image = batch["image"].to(self.device)
+            point_cloud = batch["point_cloud"].to(self.device) if "point_cloud" in batch else None
             targets = {
                 "heatmap": batch["heatmap"].to(self.device),
-                "bbox3d": batch["bbox3d"].to(self.device),
+                "half_edges": batch["half_edges"].to(self.device),
+                "center_3d": batch["center_3d"].to(self.device),
                 "centers_2d": batch["centers_2d"].to(self.device),
                 "num_objects": batch["num_objects"].to(self.device),
             }
             # forward + loss
             with torch.amp.autocast(self.device.type, enabled=self.use_amp):
-                preds = self.model(image)
+                preds = self.model(image, point_cloud=point_cloud)
                 loss, loss_dict = self.loss_fn(preds, targets)
                 loss = loss / self.grad_accum_steps
             # backward
@@ -69,7 +70,6 @@ class Trainer:
     @torch.no_grad()
     def validate(self, epoch):
         """run one full pass over val-set """
-        
         self.model.eval()
         running = {}
         n_batches = 0
@@ -77,12 +77,14 @@ class Trainer:
             image = batch["image"].to(self.device)
             targets = {
                 "heatmap": batch["heatmap"].to(self.device),
-                "bbox3d": batch["bbox3d"].to(self.device),
+                "half_edges": batch["half_edges"].to(self.device),
+                "center_3d": batch["center_3d"].to(self.device),
                 "centers_2d": batch["centers_2d"].to(self.device),
                 "num_objects": batch["num_objects"].to(self.device),
             }
 
-            preds = self.model(image)
+            point_cloud = batch["point_cloud"].to(self.device) if "point_cloud" in batch else None
+            preds = self.model(image, point_cloud=point_cloud)
             _, loss_dict = self.loss_fn(preds, targets)
 
             for key, val in loss_dict.items():
@@ -94,7 +96,6 @@ class Trainer:
 
     def fit(self):
         """main training loop"""
-        
         for epoch in range(self.config.epochs):
             train_losses = self.train_one_epoch(epoch)
             val_losses = self.validate(epoch)
