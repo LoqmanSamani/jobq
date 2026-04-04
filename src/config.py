@@ -65,7 +65,7 @@ class Config:
     w_offset: float = 0.1
     w_corners: float = 1.5
     w_center: float = 1.5
-    w_scale: float = 1.5
+    w_scale: float = 1.0
     focal_alpha: float = 2.0
     focal_beta: float = 4.0
 
