@@ -139,6 +139,8 @@ The model is a CenterNet-style dual-stream network. i chose CenterNet as the bas
 
 - **Detection heads**: each is a stack of three 3x3 conv layers with BatchNorm, ReLU, and dropout, followed by a 1x1 output conv.
 
+The full model has about 12.9M parameters total (12.76M trainable, 148K frozen in ResNet-18 layer 1).
+
 The four output maps at stride 4 (64x96 for a 256x384 input):
 
 | Head       | Channels | Output                                    |
