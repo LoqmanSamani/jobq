@@ -238,7 +238,7 @@ The left column shows GT heatmaps with clean Gaussian peaks at each object cente
 
 Green wireframes are ground truth, red wireframes are predictions, and the rightmost column overlays both. for the top row (fewer, larger objects), the predicted boxes align fairly well with the GT in both position and orientation. In the middle row, the model captures the general layout of objects on a shelf but shows some size and orientation mismatches. The bottom row (densely packed scene) is the hardest, where predictions overlap heavily and the model struggles to separate individual objects. This pattern makes sense: with more objects in a scene, the heatmap peaks crowd together and become harder to distinguish.
 
-***Note:* to see all visualizations (for all 20 testset samples you should find predicted visualizations in: heatmap, wireframes and bev) refer to: `outputs/visualizations/`
+**Note:** to see all visualizations (for all 20 testset samples you should find predicted visualizations in: heatmap, wireframes and bev) refer to: `outputs/visualizations/`
 
 
 ### Summary and Limitations
