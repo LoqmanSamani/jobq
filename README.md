@@ -81,28 +81,28 @@ Data goes through three stages: preprocessing, training, and inference. Raw samp
 The model is a CenterNet-style dual-stream network. I chose CenterNet as the base because it is anchor-free, which avoids the need to define anchor boxes for 3D objects (where shapes and orientations vary a lot). It also naturally outputs dense per-pixel predictions, making it straightforward to add geometry heads on top.
 
 ```
-RGB image (b, 3, 256, 384)         Point cloud (b, 3, 256, 384)
-        |                                      |
-ResNet-18 backbone                    Point-cloud encoder
-(ImageNet pretrained)              (3 conv layers -> 64ch @ stride 4)
-        |                                      |
-    FPN neck                                   |
-(64ch @ stride 4)                              |
-        |                                      |
-        +------------ concat + fuse -----------+
-                          |
-                  Cross-modal fusion
-                    (128 -> 64ch)
-                          |
-                +---------+---------+
-                |                   |
-          Classification        Geometry
-          branch (3x3)          branch (3x3)
-                |                   |
-          +-----+-----+       +----+----+
-          |           |       |         |
-      Heatmap     Offset  Regression  Center3D
-       (1ch)      (2ch)    (9ch)       (3ch)
+            RGB image (b, 3, 256, 384)         Point cloud (b, 3, 256, 384)
+                    |                                      |
+            ResNet-18 backbone                    Point-cloud encoder
+            (ImageNet pretrained)              (3 conv layers -> 64ch @ stride 4)
+                    |                                      |
+                FPN neck                                   |
+            (64ch @ stride 4)                              |
+                    |                                      |
+                    +------------ concat + fuse -----------+
+                                    |
+                            Cross-modal fusion
+                                (128 -> 64ch)
+                                    |
+                            +---------+---------+
+                            |                   |
+                    Classification        Geometry
+                    branch (3x3)          branch (3x3)
+                            |                   |
+                    +-----+-----+       +----+----+
+                    |           |       |         |
+                Heatmap     Offset  Regression  Center3D
+                (1ch)      (2ch)    (9ch)       (3ch)
 ```
 
 **Why each component matters:**
@@ -122,7 +122,7 @@ The four output maps at stride 4 (64x96 for a 256x384 input):
 | Heatmap    | 1        | Object center probability                 |
 | Offset     | 2        | Sub-pixel center refinement (dy, dx)      |
 | Regression | 9        | 3 half-edge vectors x 3 coordinates       |
-| Center 3D  | 3        | 3D object center (x, y, z)               |
+| Center 3D  | 3        | 3D object center (x, y, z)                |
 
 
 ### Loss Functions
