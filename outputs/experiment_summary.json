@@ -36,7 +36,7 @@
     "n_samples": 20
   },
   "onnx_export": {
-    "onnx_path": "/home/loqman/Downloads/projs/jobq/outputs/onnx/model.onnx",
+    "onnx_path": "../jobq/outputs/onnx/model.onnx",
     "onnx_size_mb": 0.22,
     "onnx_validation": {
       "matches": true,
@@ -47,7 +47,7 @@
         "center_3d": 5.960464477539062e-07
       }
     },
-    "fp16_path": "/home/loqman/Downloads/projs/jobq/outputs/onnx/model_fp16.onnx",
+    "fp16_path": "../jobq/outputs/onnx/model_fp16.onnx",
     "fp16_size_mb": 24.84
   }
 }
